@@ -162,4 +162,38 @@ SELECT
     ROUND((value - LAG(value) OVER (ORDER BY year)) / LAG(value) OVER (ORDER BY year) * 100, 2) AS US_gdp_growth
 FROM USdata
 WHERE indicator_name = 'GDP (current US$)'
-ORDER BY year; -- United States GDP Growth
+ORDER BY year;
+
+-- Top 40 High Income Countries With Lowest Inflation in 2022
+
+SELECT
+	iv.year,
+    c.country_name,
+    c.incomegroup,
+    iv.value,
+    i.indicator_name
+FROM indicator_values iv
+JOIN countries c ON iv.country_id = c.country_id
+JOIN indicators i ON iv.indicator_id = i.indicator_id
+WHERE iv.indicator_id = 7 
+	and iv.year = 2022
+AND c.incomegroup LIKE '%High income%'
+Order by iv.value ASC
+LIMIT 40;
+
+-- Top 40 High Income Countries With Lowest Inflation in 2024
+
+SELECT
+	iv.year,
+    c.country_name,
+    c.incomegroup,
+    iv.value,
+    i.indicator_name
+FROM indicator_values iv
+JOIN countries c ON iv.country_id = c.country_id
+JOIN indicators i ON iv.indicator_id = i.indicator_id
+WHERE iv.indicator_id = 7 
+	and iv.year = 2024
+AND c.incomegroup LIKE '%High income%'
+Order by iv.value ASC
+LIMIT 40;
