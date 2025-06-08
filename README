@@ -1,6 +1,6 @@
 I gathered the data from World Bank and FRED to build my portfolio where I used SQL to perform data analysis. I built two tables that contain the list of countries and indicators. Then, I used the two tables and joined them together with the values that correspond to each indicator and country.
 
-I used Excel to combine various indicators and their values, matching them with specific country IDs to create mastersheet2.csv (utilizing VLOOKUP). Also, please note that GDP data is in nominal.
+I used Excel to combine various indicators and their values, matching them with specific country IDs to create mastersheet2.csv (utilizing VLOOKUP). Also, please note that GDP data is nominal.
 
 I also created a view table for the US data so it's easier to populate if there are datas that need to be added.
 
