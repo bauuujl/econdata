@@ -4,8 +4,10 @@ I used Excel to combine various indicators and their values, matching them with 
 
 I also created a view table for the US data so it's easier to populate if there are datas that need to be added.
 
-(https://github.com/user-attachments/assets/5ee0d2df-f8ea-43ab-a9b1-39772c9742c1)
+![Image](https://github.com/user-attachments/assets/2ddf0087-92dd-4e7d-9420-5cc9bfc69930)
 
 Then, I visualize these datas using PowerBI.
 
 ![US Economic Visualization](powerbiecon.png)
+
+![Image](https://github.com/user-attachments/assets/16c8d3cc-0cf3-4fd4-9ab5-bb88607cab01)
