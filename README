@@ -3,5 +3,7 @@ I gathered the data from World Bank and FRED to build my portfolio where I used 
 I used Excel to combine various indicators and their values, matching them with specific country IDs to create mastersheet2.csv (utilizing VLOOKUP). Also, please note that GDP data is nominal.
 
 I also created a view table for the US data so it's easier to populate if there are datas that need to be added.
+![US GDP Growth](sqlecon.png)
 
 Then, I visualize these datas using PowerBI.
+![US Economic Visualization](powerbiecon.png)
