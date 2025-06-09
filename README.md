@@ -71,7 +71,7 @@ I used Excel to combine various indicators and their values, matching them with 
 
 ### Visualization
 
-I also created a view table for the US data so it's easier to populate if there are datas that need to be added.
+I also created a view table for the US data so it's easier to populate if there are data that need to be added.
 
     CREATE VIEW USdata AS
     SELECT
@@ -85,6 +85,6 @@ I also created a view table for the US data so it's easier to populate if there 
 
 ![US GDP Growth Table](Screenshots/sqlecon.png)
 
-Then, I visualize these datas using PowerBI.
+Then, I visualize these data using PowerBI.
 
 ![Analysis](Screenshots/powerbiecon.png)
