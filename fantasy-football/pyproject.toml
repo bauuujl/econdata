@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffbets"
+version = "1.0.0"
+description = "Simulate a fantasy football week and find the bettable edge"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+ffbets = "ffbets.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ffbets*"]

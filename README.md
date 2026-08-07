@@ -3,6 +3,8 @@
 ## Features
 - **SQL** 
 - **Power BI**
+- **Python** — see [fantasy-football/](fantasy-football/), a Monte Carlo
+  simulator that prices fantasy matchups against sportsbook odds
 
 ### Overview
 
@@ -88,3 +90,30 @@ I also created a view table for the US data so it's easier to populate if there 
 Then, I visualize these data using PowerBI.
 
 ![Analysis](Screenshots/powerbiecon.png)
+
+---
+
+## Fantasy Football Betting Model
+
+A separate project in [`fantasy-football/`](fantasy-football/): a Python tool
+that decides which fantasy team is actually worth betting on.
+
+It pulls a Sleeper league, re-scores every starter's projection under that
+league's own scoring rules, and simulates the week 20,000 times — drawing
+player scores from skewed distributions and linking teammates through a
+shared per-game factor, so a stacked roster swings harder than a spread-out
+one. The resulting win probabilities become fair prices, which it compares
+against sportsbook odds to find the mispriced side and size the stake by
+quarter Kelly.
+
+It also grades itself. `ffbets backtest` replays finished weeks using only
+what was knowable beforehand and reports hit rate, Brier score and a
+calibration table — on a full 2025 season it beat a coin flip by about 4.6%
+Brier skill, which is a real but small edge on a small sample.
+
+Standard library only, no API key.
+
+    cd fantasy-football
+    python3 -m ffbets demo                          # synthetic data, no network
+    python3 -m ffbets leagues --user your_username  # find your league ID
+    python3 -m ffbets analyze --league <id> --odds book.json

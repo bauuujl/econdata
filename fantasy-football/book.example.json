@@ -1,0 +1,9 @@
+{
+  "_comment": "Sportsbook prices for one week. Keys match on team name, manager handle, a unique fragment of either, or the roster ID. American (-120, +180) and decimal (1.83) odds both work. Keys that match no team are ignored, so leaving this comment in is harmless.",
+
+  "Oil of Olave": "-120",
+  "Nabers suck my Penix": "+140",
+  "louisflores": "+180",
+  "PaulWalkerandthePorsche": "-215",
+  "TuaGirlsOneKupp": 105
+}
