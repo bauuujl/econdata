@@ -71,6 +71,10 @@ class PlayerOutlook:
     source: str = "prior"
     injury_status: str = None
     on_bye: bool = False
+    # How far apart the projection sources were, in points. Folded into `sd`,
+    # and kept here so a disputed player can be spotted in the detail view.
+    disagreement: float = 0.0
+    contributions: dict = field(default_factory=dict)
 
     @property
     def expected(self):
@@ -134,6 +138,7 @@ class ProjectionBuilder:
         history_weeks=8,
         player_db=None,
         verbose=False,
+        ensemble=None,
     ):
         self.client = client
         self.scoring = scoring_settings
@@ -145,9 +150,21 @@ class ProjectionBuilder:
         self.verbose = verbose
         self.player_db = player_db or {}
 
+        if ensemble is None:
+            # The historical default: projections lead, recent form checks them.
+            from .sources import build_ensemble
+
+            ensemble = build_ensemble(
+                "rotowire:%g,form:%g" % (projection_weight, 1.0 - projection_weight)
+            )
+        self.ensemble = ensemble
+
         self.projections = {}  # player_id -> {"points","meta"}
         self.history = {}  # player_id -> [points, ...] most recent last
         self.teams_playing = set()
+        # Fantasy points each defence has allowed by position, for the
+        # opponent-adjusted source.
+        self.allowed = {}  # nfl_team -> position -> [points allowed, ...]
         self._load()
 
     # ------------------------------------------------------------------
@@ -205,6 +222,42 @@ class ProjectionBuilder:
                 self.history.setdefault(player_id, []).append(
                     score_statline(stats, self.scoring)
                 )
+                self._record_allowed(player_id, stats)
+
+    def _record_allowed(self, player_id, stats):
+        """Log how many points a defence gave up to each position.
+
+        Only defensive statlines carry these keys, so this doubles as the
+        test for whether the entry is a team defence.
+        """
+        from .sources import ALLOWED_KEYS
+
+        if "fan_pts_allow_qb" not in stats:
+            return
+        for position, key in ALLOWED_KEYS.items():
+            value = stats.get(key)
+            if value is not None:
+                self.allowed.setdefault(player_id, {}).setdefault(position, []).append(
+                    float(value)
+                )
+
+    def defense_factor(self, team, position):
+        """How generous `team` has been to `position`, relative to the league.
+
+        Above 1 means they give up more than average and the matchup is
+        favourable. Returns None when there is not enough history to say.
+        """
+        per_team = {}
+        for defence, positions in self.allowed.items():
+            values = positions.get(position) or []
+            if values:
+                per_team[defence] = sum(values) / len(values)
+        if len(per_team) < 8 or team not in per_team:
+            return None
+        league_average = sum(per_team.values()) / len(per_team)
+        if league_average <= 0:
+            return None
+        return per_team[team] / league_average
 
     # ------------------------------------------------------------------
     def outlook(self, player_id):
@@ -228,28 +281,27 @@ class ProjectionBuilder:
         opponent = projection.get("opponent")
         injury = projection.get("injury_status") or database.get("injury_status")
 
-        projected = projection.get("points") if projection.get("has_stats") else None
-        trailing = sum(history) / len(history) if history else None
-
-        # Projections already fold in matchup, role and recent form, so they
-        # lead.  A player's own game log gets a minority vote as a check on
-        # projections that have gone stale.
-        if projected is not None and trailing is not None and len(history) >= 3:
-            weight = self.projection_weight
-            mean = weight * projected + (1.0 - weight) * trailing
-            source = "projection+form"
-        elif projected is not None:
-            mean = projected
-            source = "projection"
-        elif trailing is not None:
-            mean = trailing
-            source = "game log"
+        estimate = self.ensemble.combine(player_id, self) if self.ensemble else None
+        if estimate is not None:
+            mean = estimate.mean
+            source = estimate.label
+            disagreement = estimate.disagreement
+            contributions = estimate.contributions
         else:
+            # Nothing has an opinion: a deep bench piece nobody projects and
+            # who has not played. Replacement level keeps the lineup honest.
             mean = REPLACEMENT_MEAN.get(position, 5.0)
             source = "replacement"
+            disagreement = 0.0
+            contributions = {}
 
         mean = max(mean, 0.0)
         sd, games_used = shrunk_sd(mean, history, position)
+        # Sources disagreeing is real uncertainty about this player, on top of
+        # their week-to-week variance. The two are near enough independent to
+        # add in quadrature.
+        if disagreement > 0:
+            sd = math.sqrt(sd * sd + disagreement * disagreement)
 
         on_bye = bool(self.teams_playing) and bool(team) and team not in self.teams_playing
         probability = 0.0 if on_bye else play_probability(injury)
@@ -267,6 +319,8 @@ class ProjectionBuilder:
             source=source,
             injury_status=injury,
             on_bye=on_bye,
+            disagreement=disagreement,
+            contributions=contributions,
         )
 
     def outlooks(self, player_ids):

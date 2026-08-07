@@ -97,39 +97,266 @@ a little growth for a lot less ruin.
 ## Does it actually work?
 
 Ask it. `backtest` replays finished weeks using only what was knowable
-beforehand — that week's published projections and game logs from prior weeks
-only — and grades itself:
+beforehand and grades itself four ways.
 
 ```
 $ ffbets backtest --league 1199943242200662016
 
-  weeks 2-13  |  60 matchups graded
+  weeks 2-13  |  60 matchups graded  |  1.4 stacked starter pairs per roster
 
 ACCURACY
-------------------------------------------------------------------------------
-  Favourite won            60.0% of the time
-  Brier score              0.2385   (0.25 = coin flip, lower is better)
-  Brier skill vs coinflip  +4.6%
-  Log loss                 0.6704   (0.693 = coin flip)
+  Favourite won            61.7% of the time  (+/- 6.3)
+  Brier score              0.2341   (0.25 = coin flip, lower is better)
+  Brier skill vs coinflip  +6.4%
+  Team score MAE           24.3 points   (bias -1.9)
 
-TEAM SCORE PROJECTIONS
-------------------------------------------------------------------------------
-  Mean absolute error      24.5 points per team-week
-  Bias                     -2.9 points  (under-projecting)
-
-CALIBRATION  (does 70% mean 70%?)
-------------------------------------------------------------------------------
-  CONFIDENCE           N   PREDICTED    ACTUAL
-  50-60%              25       54.9%     48.0%
-  60-70%              11       63.6%     72.7%
-  70-80%              17       74.7%     58.8%
-  80-90%               7       84.3%     85.7%
+WHERE THE SCORE COMES FROM  (Murphy decomposition of Brier)
+                                    RAW   CALIBRATED
+  Brier                          0.2341       0.2341
+    reliability (calibration)     0.0075       0.0075   lower is better
+    resolution (discrimination)   0.0183       0.0183   higher is better
+    uncertainty                  0.2489       0.2489   irreducible
 ```
 
-Read that honestly: a real edge, but a small one on a small sample. Fantasy
-weeks are genuinely noisy, and a single season is only ~60 matchups — far too
-few to separate a 4% edge from luck. Run it on your own league before you
-trust it, and size accordingly.
+Read that decomposition rather than the hit rate. **Resolution** is the
+information the model actually carries; **reliability** is how much of it
+overconfidence gives back. Here resolution (0.0183) is more than double
+reliability (0.0075), which says the edge is real information partly wasted
+by stating it too confidently -- not an artefact of sounding sure. Only the
+second term is fixable by recalibration; the first has to be earned.
+
+`--html` writes the same thing with a reliability plot, drawn as inline SVG
+with no plotting library.
+
+### Recalibration
+
+Isotonic and Platt maps are fitted **out-of-sample**, in folds grouped by
+week so that two matchups from the same week never land on opposite sides of
+the split. On this league both make things worse:
+
+```
+  METHOD          BRIER    LOG LOSS     IMPROVE  FIT
+* none           0.2341      0.6601          --  no adjustment
+  platt          0.2582      0.7193     -0.0241  slope 0.647 (overconfident), intercept -0.154
+  isotonic       0.2857      1.5223     -0.0516  12 knots
+```
+
+That is worth sitting with. The Platt slope of 0.647 confirms the
+overconfidence -- the model really does state 70% when it means something
+nearer 63% -- but correcting it from 60 matchups costs more in fitting noise
+than it recovers. Isotonic, with far more freedom, is worse still. **The
+honest conclusion is not "recalibrate", it is "you do not have enough data to
+recalibrate yet."** The machinery selects on out-of-sample Brier, so it
+declines to use a map that does not earn its place, and `--save-calibrator`
+writes an identity map rather than pretending.
+
+Feed a real season or two into it and the picture may change. That is what
+`--calibrator` is for: it applies a saved map to live probabilities *before*
+they reach expected value and Kelly, which is the only place recalibration
+changes what you bet.
+
+### Closing line value
+
+Win/loss records converge slowly. The hit rate above carries a ±6.3 point
+standard error, which cannot distinguish a 3% edge from luck. Closing line
+value converges far faster because it grades the price rather than the
+result, so it is the metric this tool leads with:
+
+```
+CLOSING LINE VALUE
+  Bets graded              50
+  Mean CLV                 +13.09%  (+/- 2.76)
+  Beat the close           78.0%  (+/- 5.9)
+  Mean EV at close         +0.083 per $1 staked
+```
+
+**Read the caveat before the number.** Private fantasy leagues have no
+sportsbook, so there is no real closing line for a past season, and those
+figures come from a simulated market. They demonstrate that the pipeline
+works; they are not evidence of an edge, and the tool says so in its own
+output. Supply real prices and it becomes a genuine measurement:
+
+```bash
+ffbets backtest --league <id> --lines lines.json
+```
+
+```json
+{
+  "5": {
+    "Oil of Olave":  {"open": "-115", "close": "-140"},
+    "louisflores":   {"open": "+180", "close": "+155"}
+  }
+}
+```
+
+## Staking, and what miscalibration costs
+
+Quarter Kelly is a guard against a bad probability, not a cure. `stress`
+settles the question with a controlled experiment instead of a backtest,
+because a *backtest cannot answer it* -- with a simulated market you have
+already decided whether the model has an edge, and the bankroll comparison
+just reports your assumption back to you.
+
+So the truth is specified instead: a real win probability is drawn, the
+market prices it exactly plus vig, and the bettor sees an overconfident
+version and bets whenever the distortion says there is value. The bettor has
+**no edge at all**. Every apparent one is the miscalibration talking.
+
+```
+$ ffbets stress
+
+OVERCONFIDENCE 1.80x   (a true 60% is stated as 67%)
+  POLICY                          MEDIAN  5th PCTL   MEAN DD     RUIN
+  Full Kelly                       0.616     0.111     58.2%    41.2%
+  Half Kelly                       0.853     0.424     34.3%    10.5%
+  Quarter Kelly                    0.938     0.674     18.6%     0.0%
+  Quarter + 30% market             0.966     0.806     10.9%     0.0%
+  Quarter + 30% market + caps      0.967     0.823     10.1%     0.0%
+  Flat 2%                          0.973     0.846      8.7%     0.0%
+```
+
+Full Kelly on probabilities stretched by 1.8x ruins **41% of seasons**.
+Quarter Kelly survives but still bleeds, and still endures an 18.6% drawdown
+on the way. Shrinking 30% toward the market roughly halves the drawdown for
+a third of the loss. At 1.0x -- a perfectly calibrated bettor -- no policy
+places a single bet, which is the correct answer and a useful check that the
+experiment is set up right.
+
+Both guards are available live:
+
+```bash
+ffbets analyze --league <id> --odds book.json --shrinkage 0.3 --cap 0.05
+```
+
+`--shrinkage` blends the model toward the market's de-vigged probability
+before sizing; `--cap` bounds any single stake.
+
+## Choosing a de-vig method
+
+Which side looks like value depends on how you remove the book's margin, so
+the method is selectable with `--devig`. On a -300 / +240 market:
+
+| Method | Favourite | Longshot |
+| --- | --- | --- |
+| proportional | 71.83% | 28.17% |
+| shin | 72.79% | 27.21% |
+| additive | 72.79% | 27.21% |
+| power | 73.31% | 26.69% |
+
+Worth noting, because it is easy to have backwards: **proportional
+*understates* favourites**, it does not overstate them. It strips margin in
+proportion to each side's probability, so in absolute terms it takes the most
+off the favourite -- 3.2 points here against the longshot's 1.2. Since books
+empirically load more margin onto longshots, that is the wrong direction, and
+it is why the default here is **Shin**, which infers the margin from an
+insider-money model and lands between the two extremes. The methods disagree
+by about 1.5 points of probability on this market and more as it gets
+lopsided, which is exactly the range where a bet is marginal.
+
+## Ensembling projection sources
+
+One feed is one opinion. `--sources` takes a weighted committee:
+
+```bash
+ffbets analyze --league <id> --sources rotowire:0.6,form:0.2,opponent:0.2
+```
+
+| Source | What it is |
+| --- | --- |
+| `rotowire` | Sleeper's published projections, re-scored under league rules |
+| `form` | exponentially-weighted recent scoring, half-life 3 games |
+| `opponent` | recent form adjusted by how generous the opposing defence has been to that position |
+| `file` | your own numbers, via `--projection-file` (JSON or CSV) |
+
+Disagreement between sources is not averaged away -- it is folded into the
+player's spread. Two sources saying 14 and one saying 6 describes a player we
+do not really know, and that uncertainty belongs in the simulation, where it
+correctly pulls extreme win probabilities back toward the middle.
+
+One caution: Sleeper's projections endpoint accepts a `company` parameter and
+will happily return HTTP 200 for `sportradar`, `fantasypros` or `espn`, but
+only `rotowire` comes back with populated statlines. There is no second
+provider hiding behind that parameter, and a 200 is not a second opinion.
+
+## Fitting the correlations
+
+The simulator's factor loadings started as reasoned defaults. `correlations`
+replaces them with values fitted to real game logs:
+
+```
+$ ffbets correlations --league <id> --save corr.json
+
+OBSERVED  (correlation of fantasy points, then of the normals beneath)
+  KIND      PAIR           POINTS    LATENT       N
+  same_team QB-WR1         +0.370    +0.398     334
+  same_team QB-WR2         +0.408    +0.437     309
+  same_team QB-TE1         +0.254    +0.279     303
+  same_team QB-RB1         +0.073    +0.080     335
+  same_team WR1-WR2        -0.021    -0.025     330
+  opposing  QB-QB          +0.243    +0.253     154
+  defense   DEF-QB         -0.313    -0.373     345
+  defense   DEF-OFF        -0.313    -0.408     388
+
+FITTED LOADINGS
+  rho_QB      0.771
+  rho_WR      0.453
+  rho_RB      0.228
+  rho_TE      0.192
+  rho_K       0.050
+  game_share  0.468
+  defense     0.596
+```
+
+Those correlations of *points* are converted to correlations of the *normals*
+beneath the lognormal before fitting -- the transform compresses correlation,
+so skipping that step leaves the simulator systematically under-correlated.
+The loadings then come out of an alternating least squares fit, which needs
+no optimiser because every parameter is linear once the others are held fixed.
+
+The numbers are recognisably football. Quarterbacks track their offence
+hardest (0.771); running backs barely do (0.228), because game script pushes
+carries up exactly when passing volume falls; and defences load hard against
+the offence they face (0.596).
+
+Two of them are more interesting than the fit:
+
+- **QB-RB1 is +0.07** -- essentially independent, despite sharing an offence.
+- **WR1-WR2 is -0.02** -- two receivers on the same team are *not* positively
+  correlated at all, because competition for the same targets cancels the
+  shared-offence effect.
+
+A single shared factor per offence can only ever produce positive teammate
+correlation, so that second one is **unrepresentable** in this model. It is
+reported as a residual rather than absorbed silently into the loadings:
+
+```
+WORST MISFITS
+  same_team WR1-WR2        -0.025    +0.206   -0.230
+  same_team WR1-TE1        -0.067    +0.087   -0.154
+```
+
+### What the fitted values change: almost nothing
+
+Pass them back with `--correlations corr.json` and the league-wide effect is
+tiny -- team score spread moves +0.4%, upset probability +0.14 points. That is
+not a bug, and the reason matters: **correlation can only act where two
+starters share an offence**, and a typical fantasy roster has 10 starters
+spread across 8 NFL teams. This league averages 1.4 stacked pairs per roster
+out of 45 possible.
+
+Where it does bite, it bites hard. Six starters from one offence:
+
+| Loadings | Stacked roster SD | Diversified SD |
+| --- | --- | --- |
+| independent | 17.58 | 17.67 |
+| defaults | 21.50 | 17.62 |
+| fitted | 22.60 | 17.68 |
+
+Fitted loadings make a heavy stack 28% more volatile than independence and 5%
+more than the defaults, against a closed-form check of 22.83. So the parameters
+matter for stacking decisions and barely at all for a diversified league --
+which is worth knowing before you spend effort tuning them. `backtest` prints
+the stack count alongside every result so the number is never read without it.
 
 ## How the model works
 
@@ -184,7 +411,9 @@ first, so a lone quarterback is never burned in a SUPER_FLEX.
 | --- | --- |
 | `leagues --user NAME` | Look up your league IDs from a Sleeper username |
 | `analyze --league ID` | Simulate a week and price every side |
-| `backtest --league ID` | Grade the model against weeks already played |
+| `backtest --league ID` | Grade the model: accuracy, decomposition, recalibration, CLV, staking |
+| `correlations --league ID` | Fit the simulator's factor loadings from real game logs |
+| `stress` | What miscalibration costs each staking rule |
 | `demo` | Run the whole pipeline on synthetic data, no network |
 
 Useful flags for `analyze`:
@@ -198,8 +427,12 @@ Useful flags for `analyze`:
 | `--html PATH` | — | Write a self-contained HTML report |
 | `--json` | off | Machine-readable output for your own analysis |
 | `--lineup` | `auto` | `auto`, `declared` or `optimal` |
-| `--correlation` | 0.35 | How tightly teammates move together (0–0.9) |
-| `--projection-weight` | 0.80 | Projections vs a player's own game log |
+| `--sources` | `rotowire,form` | Projection committee, with optional weights |
+| `--correlations` | — | Fitted loadings from the `correlations` command |
+| `--calibrator` | — | Saved recalibration map, applied before EV and Kelly |
+| `--shrinkage` | 0.0 | Weight on the market's probability when sizing |
+| `--cap` | 0.25 | Ceiling on a single stake |
+| `--devig` | `shin` | `shin`, `power`, `additive` or `proportional` |
 | `--kelly` | 0.25 | Kelly multiplier for stake sizing |
 | `--offline` | off | Use only cached data, never touch the network |
 
@@ -213,17 +446,28 @@ working on a plane.
 python3 -m unittest discover -s tests -t .
 ```
 
-89 tests, no network required.
+238 tests, no network required.
 
 ## Limits worth knowing
 
-- Projections come from a single source (Rotowire, via Sleeper). One source
-  is one opinion; a consensus of several would be better.
-- The correlation parameters are reasoned defaults, not fitted values. If you
-  have the data to fit them on your league, do.
+- **No real market exists for private-league fantasy matchups.** The CLV
+  machinery is real and works the moment you supply prices, but every CLV
+  figure produced without `--lines` comes from a simulated market and proves
+  the pipeline, not an edge.
+- **60 matchups is not enough to recalibrate.** Both maps currently lose to
+  leaving the probabilities alone. The overconfidence is real and measurable;
+  the correction is not yet reliable.
+- **The correlation model cannot represent negative teammate correlation.**
+  A single shared factor per offence only produces positive pairs, so
+  WR1-WR2 (-0.02 observed) and WR1-TE1 (-0.07) are unreachable. They surface
+  as residuals. A compositional target-share factor would fix it and is not
+  implemented.
+- **Only one projection provider is genuinely available.** The ensemble takes
+  as many sources as you like, but of the external feeds only Rotowire
+  returns data; `form` and `opponent` are computed here, and `file` is yours.
+- The stress test specifies its own truth. It shows what miscalibration
+  costs a staking rule; it does not measure your miscalibration.
 - Only head-to-head moneylines are priced. No spreads, totals or player props.
-- The backtest above covers one league and one season. That is enough to show
-  the model is not broken; it is nowhere near enough to prove an edge.
 - Sleeper only. ESPN and Yahoo leagues would need their own clients, though
   everything downstream of `sleeper.py` is league-agnostic.
 

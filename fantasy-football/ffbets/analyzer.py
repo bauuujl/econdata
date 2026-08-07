@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import odds as odds_math
+from .devig import hold_percentage, remove_vig
 from .lineup import declared_lineup, optimal_lineup, starting_slots
+from .staking import blended_probability
 from .projections import ProjectionBuilder
 from .scoring import scoring_label
 from .simulate import (
@@ -22,8 +24,10 @@ class BetRecommendation:
     team: str
     opponent: str
     roster_id: object
-    model_probability: float
+    model_probability: float  # after recalibration, if a calibrator is loaded
     fair_american: int
+    raw_probability: float = None  # straight from the simulator
+    staked_probability: float = None  # after shrinkage toward the market
     # Everything below is only populated when the bet was priced.
     price_decimal: float = None
     price_american: int = None
@@ -145,6 +149,11 @@ def analyze_league(
     use_player_db=True,
     book_odds=None,
     kelly_multiplier=0.25,
+    ensemble=None,
+    calibrator=None,
+    devig_method="shin",
+    shrinkage=0.0,
+    exposure_cap=0.25,
     verbose=False,
 ):
     league = client.league(league_id)
@@ -174,6 +183,7 @@ def analyze_league(
         projection_weight=projection_weight,
         history_weeks=history_weeks,
         player_db=player_db,
+        ensemble=ensemble,
         verbose=verbose,
     )
     if not builder.projections:
@@ -234,8 +244,20 @@ def analyze_league(
         notes=notes,
         kelly_multiplier=kelly_multiplier,
     )
+    if calibrator is not None and getattr(calibrator, "name", "identity") != "identity":
+        notes.append(
+            "win probabilities recalibrated with a fitted %s map (%s)"
+            % (calibrator.name, calibrator.description)
+        )
     analysis.recommendations = build_recommendations(
-        results, book_odds, n_sims, kelly_multiplier
+        results,
+        book_odds,
+        n_sims,
+        kelly_multiplier,
+        calibrator=calibrator,
+        devig_method=devig_method,
+        shrinkage=shrinkage,
+        exposure_cap=exposure_cap,
     )
     return analysis
 
@@ -260,8 +282,24 @@ def match_team(key, teams):
     return partial[0] if len(partial) == 1 else None
 
 
-def build_recommendations(matchups, book_odds, n_sims, kelly_multiplier):
-    """Price every side, and where the book disagrees, size the bet."""
+def build_recommendations(
+    matchups,
+    book_odds,
+    n_sims,
+    kelly_multiplier,
+    calibrator=None,
+    devig_method="shin",
+    shrinkage=0.0,
+    exposure_cap=0.25,
+):
+    """Price every side, and where the book disagrees, size the bet.
+
+    The probability travels through three stages before it is allowed to
+    size anything: the simulator's raw output, a fitted recalibration map,
+    then shrinkage toward the market's own de-vigged opinion. Expected value
+    and Kelly are computed from the last of those, because that is the number
+    with the fewest known ways of being wrong.
+    """
     teams = [team for matchup in matchups for team in (matchup.home, matchup.away)]
     priced = {}
     if book_odds:
@@ -282,11 +320,18 @@ def build_recommendations(matchups, book_odds, n_sims, kelly_multiplier):
             fair_probability = probability / decisive if decisive > 0 else 0.5
             fair_probability = min(max(fair_probability, 1e-4), 1 - 1e-4)
 
+            raw_probability = fair_probability
+            if calibrator is not None:
+                fair_probability = min(
+                    max(calibrator.predict(fair_probability), 1e-4), 1 - 1e-4
+                )
+
             recommendation = BetRecommendation(
                 team=team.name,
                 opponent=opponent.name,
                 roster_id=team.roster_id,
-                model_probability=probability,
+                model_probability=fair_probability,
+                raw_probability=raw_probability,
                 fair_american=odds_math.probability_to_american(fair_probability),
                 error=standard_error(probability, n_sims),
             )
@@ -299,21 +344,20 @@ def build_recommendations(matchups, book_odds, n_sims, kelly_multiplier):
 
                 other = priced.get(opponent.roster_id)
                 if other:
-                    fair_pair = odds_math.remove_vig([price, other])
+                    fair_pair = remove_vig([price, other], devig_method)
                     recommendation.devig_probability = fair_pair[0]
-                    recommendation.market_hold = odds_math.hold_percentage(
-                        [price, other]
-                    )
+                    recommendation.market_hold = hold_percentage([price, other])
                     baseline = fair_pair[0]
                 else:
                     baseline = recommendation.implied_probability
 
+                staked = blended_probability(fair_probability, baseline, shrinkage)
+                recommendation.staked_probability = staked
+
                 recommendation.edge = fair_probability - baseline
-                recommendation.expected_value = odds_math.expected_value(
-                    fair_probability, price
-                )
+                recommendation.expected_value = odds_math.expected_value(staked, price)
                 recommendation.kelly = odds_math.kelly_fraction(
-                    fair_probability, price, multiplier=kelly_multiplier
+                    staked, price, multiplier=kelly_multiplier, cap=exposure_cap
                 )
 
             recommendations.append(recommendation)

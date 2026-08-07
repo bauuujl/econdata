@@ -40,6 +40,20 @@ class CorrelationModel:
     # rather than that offence alone -- this is what couples both sides of a
     # shootout together.
     game_share: float = 0.35
+    # Optional per-position loadings, as fitted by `correlations.py`. A
+    # quarterback tracks his offence far more closely than a running back
+    # does, and a single shared number cannot express that.
+    loadings: dict = None
+
+    def loading_for(self, position):
+        """The factor loading to use for a player at `position`."""
+        if self.loadings:
+            value = self.loadings.get(position)
+            if value is not None:
+                return float(value)
+        if position == "K":
+            return self.kicker
+        return self.offense
 
 
 @dataclass
@@ -151,10 +165,8 @@ class WeekSimulator:
 
                 if is_defense:
                     rho = -self.correlation.defense
-                elif player.position == "K":
-                    rho = self.correlation.kicker
                 else:
-                    rho = self.correlation.offense
+                    rho = self.correlation.loading_for(player.position)
 
                 # A player who cannot post a positive mean (deep bench, or a
                 # defence in a league that scores them harshly) gets a

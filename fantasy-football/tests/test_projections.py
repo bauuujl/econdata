@@ -10,6 +10,14 @@ from ffbets.projections import (
 PPR = {"rec": 1.0, "rec_yd": 0.1, "rec_td": 6.0, "rush_yd": 0.1, "rush_td": 6.0}
 
 
+def ewma(history, half_life=3.0):
+    """Reference implementation of the form source's weighting, for tests."""
+    decay = 0.5 ** (1.0 / half_life)
+    weights = [decay ** age for age in range(len(history))]
+    values = list(reversed(history))
+    return sum(w * v for w, v in zip(weights, values)) / sum(weights)
+
+
 class FakeClient:
     """Stands in for the Sleeper API with canned payloads."""
 
@@ -108,17 +116,19 @@ class BuilderTests(unittest.TestCase):
     def test_mean_blends_projection_with_recent_form(self):
         builder = self.build()
         outlook = builder.outlook("1")
-        # projection 7 + 9 + 3.6 = 19.6; game log is 14.0 / 25.0 / 8.0
-        game_log = (14.0 + 25.0 + 8.0) / 3
-        self.assertAlmostEqual(outlook.mean, 0.8 * 19.6 + 0.2 * game_log, places=4)
-        self.assertEqual(outlook.source, "projection+form")
+        # Projection scores 7 + 9 + 3.6 = 19.6; the game log is 14 / 25 / 8,
+        # weighted toward the most recent game.
+        self.assertAlmostEqual(
+            outlook.mean, 0.8 * 19.6 + 0.2 * ewma([14.0, 25.0, 8.0]), places=4
+        )
+        self.assertEqual(outlook.source, "proj+form")
         self.assertEqual(outlook.games_used, 3)
 
     def test_thin_history_uses_the_projection_alone(self):
         builder = self.build()
         outlook = builder.outlook("2")
         self.assertAlmostEqual(outlook.mean, 7.0 + 3.0, places=4)
-        self.assertEqual(outlook.source, "projection")
+        self.assertEqual(outlook.source, "proj")
 
     def test_injury_status_is_carried_through(self):
         outlook = self.build().outlook("2")
@@ -156,8 +166,8 @@ class BuilderTests(unittest.TestCase):
         builder = self.build(fail_projections=True)
         self.assertEqual(builder.projections, {})
         outlook = builder.outlook("1")
-        self.assertEqual(outlook.source, "game log")
-        self.assertAlmostEqual(outlook.mean, (14.0 + 25.0 + 8.0) / 3, places=4)
+        self.assertEqual(outlook.source, "form")
+        self.assertAlmostEqual(outlook.mean, ewma([14.0, 25.0, 8.0]), places=4)
 
     def test_weeks_a_player_missed_are_left_out_of_the_game_log(self):
         # Player 2 has gp=0 in week 3, so only week 1 counts.
