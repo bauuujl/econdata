@@ -128,6 +128,66 @@ second term is fixable by recalibration; the first has to be earned.
 `--html` writes the same thing with a reliability plot, drawn as inline SVG
 with no plotting library.
 
+### How precise is that hit rate, really?
+
+The ±6.3 points on the hit rate is `sqrt(p(1-p)/n)` with n=60. **It is a
+property of the sample, not of the model** — no modelling change can shrink
+it, and halving it needs 240 matchups. But you do not have to wait four
+seasons to measure the model precisely, because a win/loss result throws away
+almost everything the simulator produced. Grading the *whole* forecast
+distribution against the real margin uses far more of each matchup:
+
+```
+DISTRIBUTIONAL FIT  (grades the whole forecast, not just the winner)
+  Mean CRPS                22.74 points   (lower is better)
+  Margin spread ratio      1.035  (+/- 0.092)   0.4 SE from perfect
+  Team-score spread ratio  1.073  (+/- 0.065)
+  PIT coverage             50% -> 52%,  80% -> 77%,  95% -> 95%
+```
+
+This is the most useful thing the tool now reports, and it changes the
+verdict. **The margin distribution — the only thing a win probability depends
+on — is 0.4 standard errors from correct, and PIT coverage lands within a
+couple of points of nominal at every level.** The overconfidence that the
+5-bucket reliability table appears to show is mostly small-sample noise: 12
+matchups per bucket cannot distinguish 62% from 50%, but 60 continuous
+margins can say the spread is right.
+
+That also explains why Platt recalibration keeps failing out-of-sample. It is
+correcting a distortion that is not really there.
+
+### The one real defect it did find
+
+Team *totals* were under-dispersed by about 10% while margins were fine. That
+pattern has only one explanation: a shock common to every team in the week,
+which inflates totals but cancels out of a head-to-head margin. Measuring it
+directly found roughly a 9-point swing hitting all ten teams at once, worth
+~10% of team-score error.
+
+The simulator had per-game and per-offence factors but nothing above them, so
+a `slate_share` level was added on top. It raises team-score spread while
+provably leaving margins alone (both are asserted in the tests):
+
+| | Team SD | Margin SD | corr(home, away) |
+| --- | --- | --- | --- |
+| no slate factor | 22.29 | 31.69 | −0.01 |
+| slate 0.10 | 23.31 | 31.50 | +0.09 |
+| slate 0.20 | 24.30 | 31.32 | +0.17 |
+
+Effect on the backtest: Brier skill **+6.4% → +6.9%**, and the week-common
+share of team error fell from 9.7% to 1%. Small, but it is the model getting
+structurally righter rather than a post-hoc patch — and once it was in, the
+`score` calibration below had almost nothing left to correct, which is the
+outcome you want.
+
+### Score calibration
+
+A third recalibration option corrects the simulator instead of its output:
+`mean_scale` for systematic bias and `dispersion` for systematic
+over/under-confidence, both fitted on continuous team scores rather than
+binary results — several times the information per season. It competes on the
+same out-of-sample footing as Platt and isotonic and is used only if it wins.
+
 ### Recalibration
 
 Isotonic and Platt maps are fitted **out-of-sample**, in folds grouped by
@@ -446,7 +506,7 @@ working on a plane.
 python3 -m unittest discover -s tests -t .
 ```
 
-238 tests, no network required.
+267 tests, no network required.
 
 ## Limits worth knowing
 

@@ -40,6 +40,12 @@ class CorrelationModel:
     # rather than that offence alone -- this is what couples both sides of a
     # shootout together.
     game_share: float = 0.35
+    # Share of an offence's day driven by the NFL week as a whole. Some
+    # Sundays are simply higher-scoring than others, and that shock lands on
+    # every fantasy team at once -- it inflates team totals while cancelling
+    # out of a head-to-head margin, which is exactly the pattern the backtest
+    # finds. Without it the simulator understates team-score spread.
+    slate_share: float = 0.10
     # Optional per-position loadings, as fitted by `correlations.py`. A
     # quarterback tracks his offence far more closely than a running back
     # does, and a single shared number cannot express that.
@@ -203,8 +209,12 @@ class WeekSimulator:
         teams = sorted(teams)
 
         share = self.correlation.game_share
-        game_weight = math.sqrt(share)
-        team_weight = math.sqrt(1.0 - share)
+        slate = min(max(self.correlation.slate_share, 0.0), 0.99)
+        # Three nested levels: the week, the game inside it, the offence
+        # inside that. Weights are square roots so the variances sum to one.
+        slate_weight = math.sqrt(slate)
+        game_weight = math.sqrt((1.0 - slate) * share)
+        team_weight = math.sqrt((1.0 - slate) * (1.0 - share))
 
         gauss = self.random.gauss
         uniform = self.random.random
@@ -213,16 +223,22 @@ class WeekSimulator:
         totals = [[0.0] * self.n_sims for _ in lineups]
 
         for sim in range(self.n_sims):
+            slate_factor = gauss(0.0, 1.0)
             game_factor = {key: gauss(0.0, 1.0) for key in games}
             team_factor = {}
             for team in teams:
                 own = gauss(0.0, 1.0)
                 game_key = game_of_team.get(team)
                 if game_key is None:
-                    team_factor[team] = own
+                    team_factor[team] = (
+                        slate_weight * slate_factor
+                        + math.sqrt(1.0 - slate) * own
+                    )
                 else:
                     team_factor[team] = (
-                        game_weight * game_factor[game_key] + team_weight * own
+                        slate_weight * slate_factor
+                        + game_weight * game_factor[game_key]
+                        + team_weight * own
                     )
 
             for (

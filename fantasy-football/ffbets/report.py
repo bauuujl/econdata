@@ -234,6 +234,9 @@ tr.play td:first-child{font-weight:600}
 .verdict{border:1px solid var(--line);border-left:3px solid var(--good);background:var(--card);
 border-radius:0 8px 8px 0;padding:14px 16px;margin-top:16px}
 .verdict.none{border-left-color:var(--muted)}
+.verdict.alarm{border-left-color:var(--bad);border-left-width:4px}
+.warn{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--bad);
+border-radius:0 8px 8px 0;padding:13px 16px;margin:14px 0;font-size:.9rem}
 footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);
 color:var(--muted);font-size:.8rem}
 """

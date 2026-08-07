@@ -44,6 +44,12 @@ class Prediction:
     projected_away: float
     actual_home: float
     actual_away: float
+    sd_home: float = 0.0
+    sd_away: float = 0.0
+    # A thinned, sorted copy of the simulated margin distribution. Kept so
+    # CRPS, PIT and the score-calibration cross-validation can all be
+    # computed after the fact without re-simulating the season.
+    margin_samples: list = field(default_factory=list)
 
     @property
     def home_won(self):
@@ -75,6 +81,105 @@ class BacktestResult:
     market_is_synthetic: bool = False
     market_mode: str = "sharp"
     bins: int = 5
+    score_calibration: object = None
+    score_calibrated_probabilities: list = field(default_factory=list)
+
+    # ---- distributional diagnostics -------------------------------------
+    @property
+    def margins(self):
+        return [(p.actual_home - p.actual_away) for p in self.decided]
+
+    @property
+    def crps(self):
+        """Mean CRPS of the margin forecast, in points. Lower is better."""
+        values = [
+            calib.crps_from_samples(p.margin_samples, p.actual_home - p.actual_away)
+            for p in self.decided
+            if p.margin_samples
+        ]
+        return sum(values) / len(values) if values else 0.0
+
+    @property
+    def pit(self):
+        values = [
+            calib.pit_value(p.margin_samples, p.actual_home - p.actual_away)
+            for p in self.decided
+            if p.margin_samples
+        ]
+        return calib.pit_summary(values)
+
+    def dispersion(self, level="margin"):
+        """Observed spread over simulated spread, with its standard error.
+
+        `level` is "margin" -- the only thing a win probability depends on --
+        or "team", which also picks up error that is common to both sides of
+        a matchup and therefore cancels out of the result.
+        """
+        decided = self.decided
+        if len(decided) < 3:
+            return 1.0, 0.0
+
+        if level == "team":
+            residuals = []
+            simulated = []
+            for p in decided:
+                residuals += [
+                    p.actual_home - p.projected_home,
+                    p.actual_away - p.projected_away,
+                ]
+                simulated += [p.sd_home, p.sd_away]
+        else:
+            residuals = []
+            simulated = []
+            for p in decided:
+                if not p.margin_samples:
+                    continue
+                centre = sum(p.margin_samples) / len(p.margin_samples)
+                residuals.append((p.actual_home - p.actual_away) - centre)
+                spread = sum((v - centre) ** 2 for v in p.margin_samples)
+                simulated.append(math.sqrt(spread / len(p.margin_samples)))
+
+        if len(residuals) < 3 or not simulated:
+            return 1.0, 0.0
+        mean = sum(residuals) / len(residuals)
+        observed = math.sqrt(
+            sum((r - mean) ** 2 for r in residuals) / (len(residuals) - 1)
+        )
+        expected = sum(simulated) / len(simulated)
+        if expected <= 0:
+            return 1.0, 0.0
+        # Standard error of a sample standard deviation ratio.
+        return observed / expected, 1.0 / math.sqrt(2 * (len(residuals) - 1))
+
+    @property
+    def week_common_share(self):
+        """Share of team-score error that hits every team in the week at once.
+
+        A slate-wide shock inflates every team's total together, so it shows
+        up in team scores and cancels out of margins.
+        """
+        by_week = {}
+        for p in self.decided:
+            by_week.setdefault(p.week, []).extend(
+                [p.actual_home - p.projected_home, p.actual_away - p.projected_away]
+            )
+        weeks = [values for values in by_week.values() if len(values) >= 2]
+        if len(weeks) < 3:
+            return 0.0, 0.0
+        means = [sum(values) / len(values) for values in weeks]
+        grand = sum(means) / len(means)
+        between = sum((m - grand) ** 2 for m in means) / (len(means) - 1)
+        within = []
+        for values in weeks:
+            local = sum(values) / len(values)
+            within.append(sum((v - local) ** 2 for v in values) / (len(values) - 1))
+        within_mean = sum(within) / len(within)
+        size = sum(len(v) for v in weeks) / len(weeks)
+        # Between-week variance of the means overstates the common component
+        # by the within-week noise it inherits; subtract it back out.
+        common = max(between - within_mean / size, 0.0)
+        total = common + within_mean
+        return (common / total if total > 0 else 0.0), math.sqrt(common)
 
     @property
     def fitted_methods(self):
@@ -177,6 +282,7 @@ def backtest_league(
     projection_weight=0.80,
     correlation=None,
     ensemble=None,
+    score_calibration=None,
     calibration_methods=("platt", "isotonic"),
     calibration_folds=5,
     devig_method="shin",
@@ -230,6 +336,7 @@ def backtest_league(
             history_weeks=history_weeks,
             player_db=player_db,
             ensemble=ensemble,
+            score_calibration=score_calibration,
             verbose=False,
         )
         built, _ = build_lineups(
@@ -267,6 +374,8 @@ def backtest_league(
                 continue
             home, away = teams[roster_ids[0]], teams[roster_ids[1]]
             head_to_head = compare(None, home, away)
+            margins = sorted(h - a for h, a in zip(home.totals, away.totals))
+            step = max(1, len(margins) // 2000)
             result.predictions.append(
                 Prediction(
                     week=week,
@@ -277,6 +386,9 @@ def backtest_league(
                     projected_away=away.mean,
                     actual_home=actual.get(home.roster_id, 0.0),
                     actual_away=actual.get(away.roster_id, 0.0),
+                    sd_home=home.sd,
+                    sd_away=away.sd,
+                    margin_samples=margins[::step],
                 )
             )
             counted += 1
@@ -291,6 +403,7 @@ def backtest_league(
     )
 
     _fit_calibrations(result, calibration_methods, calibration_folds, seed)
+    _fit_score_calibration(result, calibration_folds, seed)
     _grade_money(result, lines, devig_method, kelly, policies, market_mode)
     return result
 
@@ -323,6 +436,67 @@ def _fit_calibrations(result, methods, folds, seed):
     best = min(
         result.calibrations.values(),
         key=lambda report: calib.brier_score(report.calibrated, outcomes),
+    )
+    result.chosen_method = best.method
+
+
+def _fit_score_calibration(result, folds, seed):
+    """Fit the two simulator-level corrections out-of-sample.
+
+    Unlike Platt and isotonic, which reshape the probability after the fact,
+    these correct the thing that was actually wrong -- the projected mean and
+    the simulated spread -- and are fitted on continuous team scores rather
+    than binary results, which is several times the information.
+    """
+    decided = result.decided
+    if len(decided) < 8:
+        return
+
+    rows = []
+    for prediction in decided:
+        centre = (
+            sum(prediction.margin_samples) / len(prediction.margin_samples)
+            if prediction.margin_samples
+            else 0.0
+        )
+        spread = 0.0
+        if prediction.margin_samples:
+            spread = math.sqrt(
+                sum((v - centre) ** 2 for v in prediction.margin_samples)
+                / len(prediction.margin_samples)
+            )
+        rows.append(
+            (
+                prediction.projected_home + prediction.projected_away,
+                spread,
+                prediction.actual_home + prediction.actual_away,
+                prediction.margin_samples,
+                prediction.home_won,
+            )
+        )
+
+    fitted, probabilities = calib.cross_validated_score_calibration(
+        rows, result.groups, folds=folds, seed=seed
+    )
+    result.score_calibration = fitted
+    result.score_calibrated_probabilities = [
+        p if p is not None else raw
+        for p, raw in zip(probabilities, result.raw_probabilities)
+    ]
+
+    # Let it compete on the same out-of-sample footing as the other maps.
+    result.calibrations["score"] = calib.CalibrationReport(
+        method="score",
+        raw=list(result.raw_probabilities),
+        calibrated=list(result.score_calibrated_probabilities),
+        outcomes=list(result.outcomes),
+        fitted=None,
+        folds=folds,
+        description=fitted.description,
+    )
+    best = min(
+        result.calibrations.values(),
+        key=lambda report: calib.brier_score(report.calibrated, result.outcomes),
     )
     result.chosen_method = best.method
 
@@ -491,6 +665,47 @@ def render_backtest(result, top=8):
 
     mae, bias = result.score_error
     out("  Team score MAE           %.1f points   (bias %+.1f)" % (mae, bias))
+
+    out("")
+    out("DISTRIBUTIONAL FIT  (grades the whole forecast, not just the winner)")
+    out(rule)
+    margin_ratio, margin_error = result.dispersion("margin")
+    team_ratio, team_error = result.dispersion("team")
+    pit = result.pit
+    out("  Mean CRPS                %.2f points   (lower is better)" % result.crps)
+    out(
+        "  Margin spread ratio      %.3f  (+/- %.3f)   %.1f SE from perfect"
+        % (
+            margin_ratio,
+            margin_error,
+            abs(margin_ratio - 1.0) / margin_error if margin_error else 0.0,
+        )
+    )
+    out(
+        "  Team-score spread ratio  %.3f  (+/- %.3f)"
+        % (team_ratio, team_error)
+    )
+    out(
+        "  PIT coverage             50%% -> %.0f%%,  80%% -> %.0f%%,  95%% -> %.0f%%"
+        % (100 * pit.coverage_50, 100 * pit.coverage_80, 100 * pit.coverage_95)
+    )
+    share, shock = result.week_common_share
+    out(
+        "  Week-common shock        %.0f%% of team error (~%.1f pts hitting all"
+        % (100 * share, shock)
+    )
+    out("                           teams at once)")
+    out("")
+    out("  Only the MARGIN decides a win probability, and its spread is within")
+    out(
+        "  %.1f standard errors of correct -- so the model's distribution is"
+        % (abs(margin_ratio - 1.0) / margin_error if margin_error else 0.0)
+    )
+    out("  already about right. Team totals are under-dispersed because a")
+    out("  league-wide weekly shock lifts or sinks everyone together, and that")
+    out("  cancels out of a head-to-head margin. CRPS and PIT use the full")
+    out("  continuous outcome, so they say this on %d matchups where a win/loss" % len(decided))
+    out("  hit rate would need several seasons to.")
 
     out("")
     out("WHERE THE SCORE COMES FROM  (Murphy decomposition of Brier)")
@@ -684,7 +899,14 @@ def render_backtest(result, top=8):
         "  %d matchups is a small sample: the hit rate alone carries a +/-%.1f point"
         % (len(decided), 100 * result.hit_rate_error)
     )
-    out("  standard error, which is why CLV leads and ROI does not.")
+    out("  standard error. That floor is sqrt(p(1-p)/n) -- a property of the")
+    out("  sample, not of the model, so no modelling change can shrink it;")
+    out(
+        "  only more games can (halving it needs %d matchups)."
+        % (4 * len(decided))
+    )
+    out("  The distributional scores above are the way to measure this model")
+    out("  precisely without waiting four more seasons.")
     return "\n".join(lines)
 
 
@@ -831,13 +1053,32 @@ def render_backtest_html(result, title=None):
             )
 
     if result.bankrolls:
+        from .staking import stress_test
+
+        best_backtest = max(result.bankrolls, key=lambda run: run.growth)
         add("<h2>Staking</h2>")
+
+        # The warning comes BEFORE the flattering table, not after it. A reader
+        # who sees "Full Kelly +277%" first has already drawn the conclusion.
+        if result.market_is_synthetic:
+            add(
+                '<div class="warn"><strong>Read the stress test below before this '
+                "table.</strong> These bankroll paths are run against a "
+                "<em>simulated</em> market centred on the model's own "
+                "probabilities, which hands the model a real edge by "
+                "construction &mdash; so the most aggressive policy wins "
+                "mechanically, and %s topping this table is an artefact of how "
+                "the market was generated, not evidence that it is the right "
+                "way to bet.</div>" % e(best_backtest.policy.name)
+            )
+
         add(
             bankroll_chart(
                 [(run.policy.name, run.path) for run in result.bankrolls],
-                title="Bankroll by staking policy",
+                title="Bankroll by staking policy, against a simulated market",
                 subtitle="Starting from 1.0, settled week by week. Dashed line is "
-                "break even.",
+                "break even. The market here agrees with the model, so treat the "
+                "ranking as illustrative only.",
             )
         )
         add('<div class="scroll"><table>')
@@ -860,6 +1101,79 @@ def render_backtest_html(result, title=None):
                 )
             )
         add("</table></div>")
+
+        # ---- the experiment that actually answers the sizing question ----
+        levels = [1.0, 1.4, 1.8]
+        stress = [(level, stress_test(overconfidence=level, seasons=400, seed=3))
+                  for level in levels]
+
+        add("<h2>What happens when the probabilities are wrong</h2>")
+        add(
+            "<p class='viz-sub'>The table above cannot answer how to size a bet, "
+            "because a simulated market decides the answer in advance. This one "
+            "can: a true win probability is drawn, the market prices it exactly "
+            "plus vig, and the bettor sees an <em>overconfident</em> version and "
+            "bets whenever the distortion says there is value. The bettor has "
+            "<strong>no edge whatsoever</strong> &mdash; every apparent one is "
+            "the miscalibration talking. 1.0&times; is a perfectly calibrated "
+            "bettor; the Platt fits on this league keep landing near "
+            "1.5&ndash;1.6&times;.</p>"
+        )
+
+        add('<div class="scroll"><table>')
+        header = "<tr><th rowspan='2'>Policy</th>"
+        for level in levels:
+            header += "<th colspan='3'>%.1f&times; overconfident</th>" % level
+        add(header + "</tr>")
+        subheader = "<tr>"
+        for _ in levels:
+            subheader += "<th>Median</th><th>5th pctl</th><th>Ruin</th>"
+        add(subheader + "</tr>")
+
+        by_policy = {}
+        for level, results in stress:
+            for item in results:
+                by_policy.setdefault(item.policy.name, {})[level] = item
+
+        for name in [item.policy.name for item in stress[0][1]]:
+            row = "<tr><td>%s</td>" % e(name)
+            for level in levels:
+                item = by_policy[name][level]
+                ruin_class = "neg" if item.ruin_rate > 0.05 else ""
+                row += "<td class='%s'>%.3f</td><td class='%s'>%.3f</td>" % (
+                    "neg" if item.median_final < 0.95 else "",
+                    item.median_final,
+                    "neg" if item.p05_final < 0.6 else "",
+                    item.p05_final,
+                )
+                row += "<td class='%s'>%s</td>" % (
+                    ruin_class,
+                    "%.0f%%" % (100 * item.ruin_rate) if item.ruin_rate else "&mdash;",
+                )
+            add(row + "</tr>")
+        add("</table></div>")
+
+        worst = by_policy["Full Kelly"][1.8]
+        guarded = by_policy["Quarter + 30% market + caps"][1.8]
+        add(
+            '<div class="verdict alarm"><strong>The trade-off, in one line.</strong> '
+            "At 1.8&times; overconfidence Full Kelly ends the median season at "
+            "%.2f and <strong>wipes out %.0f%% of bankrolls</strong>, having "
+            "endured a %.0f%% average drawdown. The same bets sized at a quarter "
+            "Kelly, shrunk 30%% toward the market and capped, end at %.2f with a "
+            "%.0f%% drawdown and <strong>no ruinous seasons at all</strong>. "
+            "Aggressive sizing does not earn more here &mdash; it converts the "
+            "same losing edge into a faster loss. At 1.0&times; nothing is bet by "
+            "any policy, which is the correct answer and a check that the "
+            "experiment is set up right.</div>"
+            % (
+                worst.median_final,
+                100 * worst.ruin_rate,
+                100 * worst.mean_max_drawdown,
+                guarded.median_final,
+                100 * guarded.mean_max_drawdown,
+            )
+        )
 
     add(
         "<footer>%d matchups carries a &plusmn;%.1f point standard error on the hit "

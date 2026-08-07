@@ -574,3 +574,237 @@ def cross_validated_calibration(
         folds=folds,
         description=deployable.description,
     )
+
+
+# ----------------------------------------------------------------------
+# distributional scoring: grading the whole forecast, not just the winner
+# ----------------------------------------------------------------------
+def crps_from_samples(sorted_samples, actual):
+    """Continuous Ranked Probability Score for a sampled distribution.
+
+    Brier throws away almost everything the simulator produced: a 140-130
+    forecast and a 140-60 forecast both collapse to "home favoured". CRPS
+    grades the *whole* predictive distribution against the real-valued
+    outcome, so each matchup contributes far more than one bit. That is why
+    it can separate two models on 60 matchups when a hit rate cannot.
+
+    Lower is better, and it is in the units of the outcome -- points.
+
+    Uses the sorted-sample identity for the E|X - X'| term, which makes this
+    O(n log n) rather than the O(n^2) of the naive double sum.
+    """
+    count = len(sorted_samples)
+    if count == 0:
+        return 0.0
+    absolute = sum(abs(value - actual) for value in sorted_samples) / count
+    weighted = sum(
+        (2 * (index + 1) - count - 1) * value
+        for index, value in enumerate(sorted_samples)
+    )
+    return absolute - weighted / (count * count)
+
+
+def pit_value(sorted_samples, actual):
+    """Where the outcome landed inside the forecast, on a 0-1 scale.
+
+    The probability integral transform. If the forecast distribution is
+    right, these values are uniform across many matchups. Their *spread* is
+    the diagnostic that matters here: a forecast that is too narrow pushes
+    outcomes into both tails, so the PIT values pile up near 0 and 1 and
+    their variance rises above the uniform's 1/12.
+    """
+    count = len(sorted_samples)
+    if count == 0:
+        return 0.5
+    below = 0
+    for value in sorted_samples:
+        if value < actual:
+            below += 1
+        else:
+            break
+    return below / count
+
+
+UNIFORM_VARIANCE = 1.0 / 12.0
+
+
+@dataclass
+class PitSummary:
+    """How well the shape of the forecast matched reality."""
+
+    count: int
+    mean: float
+    variance: float
+    coverage_50: float
+    coverage_80: float
+    coverage_95: float
+
+    @property
+    def dispersion_ratio(self):
+        """>1 means forecasts were too narrow, <1 too wide.
+
+        Derived from the PIT spread against the uniform it should have had.
+        """
+        if self.variance <= 0:
+            return 0.0
+        return math.sqrt(self.variance / UNIFORM_VARIANCE)
+
+    @property
+    def verdict(self):
+        ratio = self.dispersion_ratio
+        if ratio > 1.05:
+            return "forecasts too narrow -- overconfident"
+        if ratio < 0.95:
+            return "forecasts too wide -- underconfident"
+        return "spread is about right"
+
+
+def pit_summary(values):
+    count = len(values)
+    if not count:
+        return PitSummary(0, 0.5, UNIFORM_VARIANCE, 0.5, 0.8, 0.95)
+    mean = sum(values) / count
+    variance = sum((v - mean) ** 2 for v in values) / count
+
+    def coverage(width):
+        low, high = 0.5 - width / 2, 0.5 + width / 2
+        return sum(1 for v in values if low <= v <= high) / count
+
+    return PitSummary(
+        count=count,
+        mean=mean,
+        variance=variance,
+        coverage_50=coverage(0.50),
+        coverage_80=coverage(0.80),
+        coverage_95=coverage(0.95),
+    )
+
+
+# ----------------------------------------------------------------------
+# score calibration: fixing the simulator instead of patching its output
+# ----------------------------------------------------------------------
+@dataclass
+class ScoreCalibration:
+    """Two corrections applied to every player before the week is simulated.
+
+    Recalibrating win probabilities after the fact treats the symptom. If the
+    model is overconfident it is usually because the simulated spread of team
+    scores is narrower than reality, and that is measurable directly:
+
+      mean_scale  actual mean team score over projected mean. Corrects a
+                  systematic tendency to under- or over-project.
+      dispersion  actual spread of (result - projection) over the spread the
+                  simulator produced. Above 1 means real weeks are more
+                  volatile than the model thinks.
+
+    Scaling every player's mean by `mean_scale` scales the team total by
+    exactly the same factor, and scaling every player's standard deviation
+    scales the team's by the same factor too -- the correlation structure is
+    untouched. So both corrections are exact at the team level.
+
+    The decisive advantage over Platt is sample size. A season gives one
+    binary outcome per matchup but *two* team scores, and a team score is a
+    real number rather than one bit. These two parameters are fitted on
+    roughly four times the information, from the quantity that is actually
+    wrong.
+    """
+
+    mean_scale: float = 1.0
+    dispersion: float = 1.0
+
+    def apply(self, mean, sd):
+        return mean * self.mean_scale, sd * self.mean_scale * self.dispersion
+
+    def rescale_margin(self, samples, centre=None):
+        """Re-centre and re-spread simulated margins without re-simulating.
+
+        A margin is a difference of two team totals, so scaling both totals
+        scales the margin's mean by `mean_scale` and its deviations by
+        `mean_scale * dispersion`. That makes cross-validating these two
+        parameters exact and nearly free.
+        """
+        if not samples:
+            return []
+        if centre is None:
+            centre = sum(samples) / len(samples)
+        shifted = centre * self.mean_scale
+        spread = self.mean_scale * self.dispersion
+        return [shifted + spread * (value - centre) for value in samples]
+
+    @property
+    def is_identity(self):
+        return abs(self.mean_scale - 1) < 1e-9 and abs(self.dispersion - 1) < 1e-9
+
+    @property
+    def description(self):
+        return "mean x%.4f, spread x%.4f" % (self.mean_scale, self.dispersion)
+
+    def to_dict(self):
+        return {"mean_scale": self.mean_scale, "dispersion": self.dispersion}
+
+
+def score_calibration_from_dict(payload):
+    payload = payload or {}
+    return ScoreCalibration(
+        mean_scale=float(payload.get("mean_scale", 1.0)),
+        dispersion=float(payload.get("dispersion", 1.0)),
+    )
+
+
+def fit_score_calibration(rows):
+    """Fit (mean_scale, dispersion) from (projected, simulated_sd, actual).
+
+    Order matters: the mean correction is applied first, because the residual
+    spread has to be measured against corrected projections or the bias leaks
+    into the dispersion estimate.
+    """
+    rows = [row for row in rows if row[0] > 0 and row[1] > 0]
+    if len(rows) < 8:
+        return ScoreCalibration()
+
+    projected = sum(row[0] for row in rows)
+    actual = sum(row[2] for row in rows)
+    mean_scale = actual / projected if projected > 0 else 1.0
+
+    residuals = [row[2] - row[0] * mean_scale for row in rows]
+    residual_mean = sum(residuals) / len(residuals)
+    residual_sd = math.sqrt(
+        sum((r - residual_mean) ** 2 for r in residuals) / (len(residuals) - 1)
+    )
+    simulated_sd = sum(row[1] * mean_scale for row in rows) / len(rows)
+
+    dispersion = residual_sd / simulated_sd if simulated_sd > 0 else 1.0
+    # A correction bigger than this is not a calibration, it is a different
+    # model, and almost certainly a sign the sample is too small.
+    dispersion = min(max(dispersion, 0.5), 2.0)
+    mean_scale = min(max(mean_scale, 0.5), 2.0)
+    return ScoreCalibration(mean_scale=mean_scale, dispersion=dispersion)
+
+
+def cross_validated_score_calibration(rows, groups, folds=5, seed=0):
+    """Fit the two corrections out-of-sample, grouped by week.
+
+    `rows` are (projected, simulated_sd, actual, margin_samples, home_won)
+    tuples. Returns (fitted_on_everything, out_of_sample_probabilities).
+    """
+    total = len(rows)
+    if total == 0:
+        return ScoreCalibration(), []
+
+    folds = max(2, min(folds, len(set(groups))))
+    probabilities = [None] * total
+
+    for held_out in grouped_folds(groups, folds=folds, seed=seed):
+        held = set(held_out)
+        training = [
+            (rows[i][0], rows[i][1], rows[i][2]) for i in range(total) if i not in held
+        ]
+        model = fit_score_calibration(training)
+        for index in held_out:
+            samples = rows[index][3]
+            adjusted = model.rescale_margin(samples)
+            wins = sum(1 for value in adjusted if value > 0)
+            probabilities[index] = wins / len(adjusted) if adjusted else 0.5
+
+    deployable = fit_score_calibration([(r[0], r[1], r[2]) for r in rows])
+    return deployable, probabilities

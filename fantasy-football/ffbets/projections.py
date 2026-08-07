@@ -139,6 +139,7 @@ class ProjectionBuilder:
         player_db=None,
         verbose=False,
         ensemble=None,
+        score_calibration=None,
     ):
         self.client = client
         self.scoring = scoring_settings
@@ -158,6 +159,10 @@ class ProjectionBuilder:
                 "rotowire:%g,form:%g" % (projection_weight, 1.0 - projection_weight)
             )
         self.ensemble = ensemble
+        # Corrections measured from past weeks: a systematic bias in the
+        # projections, and a systematic understatement of how volatile a week
+        # actually is. Applied per player, which is exact at the team level.
+        self.score_calibration = score_calibration
 
         self.projections = {}  # player_id -> {"points","meta"}
         self.history = {}  # player_id -> [points, ...] most recent last
@@ -302,6 +307,8 @@ class ProjectionBuilder:
         # add in quadrature.
         if disagreement > 0:
             sd = math.sqrt(sd * sd + disagreement * disagreement)
+        if self.score_calibration is not None:
+            mean, sd = self.score_calibration.apply(mean, sd)
 
         on_bye = bool(self.teams_playing) and bool(team) and team not in self.teams_playing
         probability = 0.0 if on_bye else play_probability(injury)
