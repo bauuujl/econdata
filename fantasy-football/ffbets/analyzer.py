@@ -237,7 +237,8 @@ def analyze_league(
         league_name=league.get("name", "League"),
         season=str(league.get("season")),
         week=week,
-        scoring=scoring_label(league["scoring_settings"]),
+        # An adapter that has already applied its platform's rules says so.
+        scoring=league.get("scoring_label") or scoring_label(league["scoring_settings"]),
         n_sims=n_sims,
         matchups=results,
         lineup_mode=lineup_mode,

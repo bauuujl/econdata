@@ -13,6 +13,7 @@ from .calibration import calibrator_from_dict
 from .devig import METHODS as DEVIG_METHODS
 from .report import render_html, render_text
 from .simulate import CorrelationModel
+from .espn import EspnClient, EspnError, parse_league_url
 from .sleeper import SleeperClient, SleeperError
 from .sources import build_ensemble
 
@@ -42,6 +43,15 @@ def parse_inline_odds(values):
 
 
 def command_leagues(args, client):
+    if getattr(args, "platform", "sleeper") == "espn":
+        print(
+            "ESPN has no public username lookup. Open your league in a browser "
+            "and copy the leagueId from the URL, then pass the whole URL:\n"
+            "  ffbets --platform espn --season 2026 analyze --league "
+            "'https://fantasy.espn.com/football/team?leagueId=...&seasonId=2026'",
+            file=sys.stderr,
+        )
+        return 1
     user = client.user(args.user)
     if not user or not user.get("user_id"):
         print("No Sleeper user named %r." % args.user)
@@ -383,6 +393,23 @@ def build_parser():
     parser.add_argument("--version", action="version", version="ffbets " + __version__)
     parser.add_argument("--cache-dir", help="where to cache API responses")
     parser.add_argument(
+        "--platform",
+        choices=["sleeper", "espn"],
+        default="sleeper",
+        help="which fantasy site the league lives on (default: sleeper)",
+    )
+    parser.add_argument(
+        "--season", help="season year, required for ESPN (e.g. 2026)"
+    )
+    parser.add_argument(
+        "--espn-s2",
+        help="ESPN espn_s2 cookie; ESPN needs it for every league, even public "
+        "ones. Defaults to the ESPN_S2 environment variable.",
+    )
+    parser.add_argument(
+        "--swid", help="ESPN SWID cookie. Defaults to the ESPN_SWID variable."
+    )
+    parser.add_argument(
         "--offline", action="store_true", help="use only cached data; never hit network"
     )
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -564,15 +591,45 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
-    args = build_parser().parse_args(argv)
-    client = SleeperClient(
+def make_client(args):
+    """Build the platform client, normalising an ESPN league URL if given."""
+    if args.platform == "espn":
+        league_id = getattr(args, "league", None)
+        season = args.season
+        if league_id:
+            league_id, url_season = parse_league_url(league_id)
+            args.league = league_id
+            season = season or url_season
+        if not season:
+            raise ValueError(
+                "ESPN needs --season (its API is keyed by season year, and the "
+                "league endpoint has no way to tell you the current one)"
+            )
+        return EspnClient(
+            league_id=league_id,
+            season=season,
+            espn_s2=args.espn_s2,
+            swid=args.swid,
+            cache_dir=args.cache_dir,
+            offline=args.offline,
+            verbose=args.verbose,
+        )
+    return SleeperClient(
         cache_dir=args.cache_dir, offline=args.offline, verbose=args.verbose
     )
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        client = make_client(args)
+    except ValueError as exc:
+        print("Error: %s" % exc, file=sys.stderr)
+        return 1
     try:
         return args.handler(args, client)
-    except SleeperError as exc:
-        print("Sleeper API error: %s" % exc, file=sys.stderr)
+    except (SleeperError, EspnError) as exc:
+        print("%s" % exc, file=sys.stderr)
         return 2
     except (ValueError, OSError) as exc:
         print("Error: %s" % exc, file=sys.stderr)

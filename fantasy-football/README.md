@@ -57,6 +57,72 @@ Optionally install it so `ffbets` is on your PATH:
 pip install -e .
 ```
 
+## ESPN leagues
+
+Sleeper is the default. For ESPN, pass `--platform espn`, the season, and your
+league URL:
+
+```bash
+ffbets --platform espn --season 2026 \
+  --espn-s2 "$ESPN_S2" --swid "$ESPN_SWID" \
+  analyze --league 'https://fantasy.espn.com/football/team?leagueId=1234567&seasonId=2026'
+```
+
+The whole URL works — the league id and season are pulled out of it — or pass
+the bare id.
+
+### You will need cookies
+
+**Every ESPN league endpoint returns 401 without them, including leagues set
+to "public".** This is not optional and there is no way around it; ESPN closed
+the anonymous read path. To get them:
+
+1. Open your league in a browser, logged in.
+2. Open developer tools → Application (or Storage) → Cookies → `espn.com`.
+3. Copy the values of `espn_s2` (a long string) and `SWID` (looks like
+   `{XXXXXXXX-....}`, braces included).
+
+Set them as environment variables so they stay out of your shell history:
+
+```bash
+export ESPN_S2='...'
+export ESPN_SWID='{....}'
+```
+
+They expire every so often; when they do you get a clear error saying the
+credentials were rejected rather than a confusing empty result.
+
+### What differs from Sleeper
+
+**Scoring is applied by the adapter, not the model.** ESPN lets a league score
+the same statistic differently by position — tight-end premium is the common
+case — which a flat `{stat: points}` map cannot express. So the ESPN client
+applies the league's own `scoringItems` itself, position by position, and
+hands the model an already-scored total. Custom scoring, TE premium and
+6-point passing TDs are all handled; the reported scoring label reflects what
+the league actually does.
+
+**Byes are read, not inferred.** ESPN publishes the full NFL schedule and every
+team's bye week, so a player on bye is known rather than guessed at from an
+absence in a projections feed. Verified against the live 2026 schedule: all 16
+Week 1 fixtures and all 32 bye weeks resolve correctly.
+
+**One request covers the week.** ESPN returns settings, teams, rosters,
+matchups and every rostered player's full stats array in a single call, so a
+week costs one fetch rather than one per feed.
+
+**No username lookup.** ESPN has no public equivalent of `ffbets leagues
+--user`; get the league id from your browser's address bar.
+
+### A caveat for a season that has not started
+
+The model's spread estimates come from players' game logs. In Week 1 of a new
+season there are none, so every player falls back to the positional prior and
+the projections carry the whole forecast. That runs fine — it is tested — but
+the win probabilities are at their least informative in Week 1 and get sharper
+each week as real games accumulate. `backtest` needs completed weeks and will
+say so politely if there are none yet.
+
 ## Pricing your bets
 
 Without prices, the tool ranks matchups by win probability — the "model
@@ -470,6 +536,7 @@ first, so a lone quarterback is never burned in a SUPER_FLEX.
 | Command | What it does |
 | --- | --- |
 | `leagues --user NAME` | Look up your league IDs from a Sleeper username |
+| `--platform espn` | Read an ESPN league instead (needs `--season` and cookies) |
 | `analyze --league ID` | Simulate a week and price every side |
 | `backtest --league ID` | Grade the model: accuracy, decomposition, recalibration, CLV, staking |
 | `correlations --league ID` | Fit the simulator's factor loadings from real game logs |
@@ -506,7 +573,7 @@ working on a plane.
 python3 -m unittest discover -s tests -t .
 ```
 
-267 tests, no network required.
+295 tests, no network required.
 
 ## Limits worth knowing
 
@@ -528,8 +595,13 @@ python3 -m unittest discover -s tests -t .
 - The stress test specifies its own truth. It shows what miscalibration
   costs a staking rule; it does not measure your miscalibration.
 - Only head-to-head moneylines are priced. No spreads, totals or player props.
-- Sleeper only. ESPN and Yahoo leagues would need their own clients, though
-  everything downstream of `sleeper.py` is league-agnostic.
+- Sleeper and ESPN. Yahoo would need its own client, though everything
+  downstream of the platform adapter is site-agnostic.
+- The ESPN adapter is tested end-to-end against a fixture built to the real
+  API's shape, and its unauthenticated parts (schedule, byes, scoring maths)
+  are verified against live data. The authenticated league path cannot be
+  exercised without someone's cookies, so treat your first live run as the
+  real test.
 
 ## A note on betting
 
