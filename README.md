@@ -3,6 +3,7 @@
 ## Features
 - **SQL** 
 - **Power BI**
+- **Python: Econometrics + Machine Learning**: [Okun's Law Across 200+ Countries](okun-ml-project/README.md)
 
 ### Overview
 

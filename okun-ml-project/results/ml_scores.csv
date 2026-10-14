@@ -1,0 +1,4 @@
+model,rmse,r_squared,train_rows,test_rows
+Naive (predict 0 change),1.0225,-0.0165,3177,1803
+Linear regression,0.9748,0.0761,3177,1803
+Random forest,0.9814,0.0636,3177,1803
