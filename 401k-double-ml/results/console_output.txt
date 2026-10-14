@@ -1,0 +1,35 @@
+Running models...
+  done: DML Lasso
+  done: DML Random forest
+  done: DML Gradient boosting
+
+=== Average households, by 401(k) eligibility ===
+         Not eligible  Eligible
+net_tfa      10788.04  30347.39
+age             40.81     41.48
+inc          31493.59  46861.66
+fsize            2.84      2.90
+educ            12.88     13.76
+marr             0.56      0.67
+twoearn          0.32      0.48
+db               0.19      0.42
+pira             0.20      0.32
+hown             0.57      0.74
+
+=== Effect of 401(k) eligibility on net financial assets ===
+                         method  estimate  std_error  ci_low  ci_high
+               OLS, no controls   19559.0     1413.0 16790.0  22329.0
+           OLS, linear controls    5896.0     1524.0  2909.0   8883.0
+                     DML: Lasso    9826.0     1340.0  7199.0  12453.0
+             DML: Random forest    8956.0     1286.0  6435.0  11477.0
+         DML: Gradient boosting    9262.0     1425.0  6469.0  12055.0
+DoubleML package: Random forest    9054.0     1272.0  6561.0  11546.0
+(Paper's estimate, DML random forest: $9,247)
+
+=== Effect by income quintile (DML, random forest) ===
+ income_quintile     income_range  estimate  std_error  households
+               1  $-2,652-$17,196    3651.0     1078.0        1983
+               2  $17,214-$26,520    1868.0     1520.0        1983
+               3  $26,523-$37,275    5552.0     1204.0        1983
+               4  $37,296-$53,841    8989.0     2129.0        1983
+               5 $53,844-$242,124   17335.0     4784.0        1983

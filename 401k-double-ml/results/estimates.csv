@@ -1,0 +1,7 @@
+method,estimate,std_error,ci_low,ci_high
+"OLS, no controls",19559.0,1413.0,16790.0,22329.0
+"OLS, linear controls",5896.0,1524.0,2909.0,8883.0
+DML: Lasso,9826.0,1340.0,7199.0,12453.0
+DML: Random forest,8956.0,1286.0,6435.0,11477.0
+DML: Gradient boosting,9262.0,1425.0,6469.0,12055.0
+DoubleML package: Random forest,9054.0,1272.0,6561.0,11546.0

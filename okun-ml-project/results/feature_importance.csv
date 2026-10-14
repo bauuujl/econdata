@@ -1,9 +1,0 @@
-feature,importance
-real_gdp_growth,0.3323
-unemp_lag,0.0725
-high_income,0.0548
-inflation_lag,0.0202
-log_pop,0.0165
-female_lf_share,0.0075
-inflation,-0.005
-growth_lag,-0.016

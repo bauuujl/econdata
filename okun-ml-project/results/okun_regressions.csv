@@ -1,9 +1,0 @@
-model,okun_coefficient,std_error,p_value,r_squared,observations
-Pooled OLS,-0.0765,0.0071,0.0,0.1011,5719
-Country fixed effects,-0.0898,0.0081,0.0,0.1442,5719
-Country + year fixed effects,-0.0785,0.0082,0.0,0.1926,5719
-United States only,-0.5942,0.102,0.0,0.6383,33
-FE: High income,-0.146,0.0162,0.0,0.2256,1854
-FE: Upper middle income,-0.0977,0.016,0.0,0.1372,1534
-FE: Lower middle income,-0.0678,0.0121,0.0,0.1414,1591
-FE: Low income,-0.0105,0.0037,0.0041,0.0433,740
